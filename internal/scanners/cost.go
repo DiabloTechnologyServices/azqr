@@ -3,11 +3,13 @@
 package scanners
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/Azure/azqr/internal/models"
 	"github.com/Azure/azqr/internal/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement"
 	"github.com/rs/zerolog/log"
 )
@@ -62,9 +64,32 @@ func (s *CostScanner) QueryCosts() (*models.CostResult, error) {
 		},
 	}
 
-	resp, err := s.client.Usage(s.config.Ctx, fmt.Sprintf("/subscriptions/%s", s.config.SubscriptionID), qd, nil)
-	if err != nil {
+	var resp armcostmanagement.QueryClientUsageResponse
+	var err error
+	maxRetries := 5
+	delay := time.Second * 5
+
+	for i := 0; i < maxRetries; i++ {
+		resp, err = s.client.Usage(s.config.Ctx, fmt.Sprintf("/subscriptions/%s", s.config.SubscriptionID), qd, nil)
+		if err == nil {
+			break
+		}
+
+		// Check if it's a 429 (rate limit)
+		var respErr *azcore.ResponseError
+		if errors.As(err, &respErr) && respErr.StatusCode == 429 {
+			log.Warn().Msgf("Received 429 Too Many Requests. Retrying in %%s (attempt %%d/%%d)...", delay, i+1, maxRetries)
+			time.Sleep(delay)
+			delay *= 2
+			continue
+		}
+
+		// If it's another error, return immediately
 		return nil, err
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("cost query failed after %%d retries: %%w", maxRetries, err)
 	}
 
 	result := models.CostResult{
